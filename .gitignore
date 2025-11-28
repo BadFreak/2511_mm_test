@@ -1,0 +1,16 @@
+# ================================
+# Build & Compilation
+# ================================
+**/build/
+
+# ================================
+# ROOT data files
+# ================================
+micromegas_ana/decodedata/*.root
+micromegas_ana/mmdata/*.root
+
+# ================================
+# Raw / intermediate data
+# ================================
+vdecode/data/**
+vdcode/result/**

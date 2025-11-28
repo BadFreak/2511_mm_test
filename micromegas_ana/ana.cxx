@@ -1,0 +1,517 @@
+#include <iostream>
+#include <vector>
+#include <set>
+#include <map>
+#include <string>
+#include <algorithm>
+#include <array>
+#include "TTree.h"
+#include "TFile.h"
+#include "TSystem.h"
+#include "TKey.h"
+#include "TH2D.h"
+#include "TBranch.h"
+#include "TCanvas.h"
+#include "TColor.h"
+#include "TLegend.h"
+#include "TMath.h"
+#include "TString.h"
+#include "TLegend.h"
+
+// Landau ⊗ Gaussian helper (aka Langau).
+Double_t LandauGauss(Double_t *x, Double_t *par) {
+    constexpr Double_t invSqrt2Pi = 0.3989422804014327;
+    const Double_t mpv = par[0];
+    const Double_t landauWidth = par[1];
+    const Double_t gaussSigma = par[2];
+    const Double_t amplitude = par[3];
+    if (landauWidth <= 0 || gaussSigma <= 0) {
+        return 0.;
+    }
+    const Double_t xVal = x[0];
+    const Double_t rangeLow = xVal - 5.0 * gaussSigma;
+    const Double_t rangeHigh = xVal + 5.0 * gaussSigma;
+    constexpr int nSteps = 100;
+    const Double_t step = (rangeHigh - rangeLow) / nSteps;
+    Double_t sum = 0.;
+    for (int i = 0; i < nSteps; ++i) {
+        const Double_t xx = rangeLow + (i + 0.5) * step;
+        const Double_t landau = TMath::Landau(xx, mpv, landauWidth, true);
+        const Double_t arg = (xVal - xx) / gaussSigma;
+        const Double_t gauss = TMath::Exp(-0.5 * arg * arg);
+        sum += landau * gauss;
+    }
+    return amplitude * step * invSqrt2Pi / gaussSigma * sum;
+}
+
+void ana() {
+    struct CsiData {
+        std::vector<int> cellADC;
+        std::vector<int> cellPLAT;
+    };
+    struct AdasData {
+        Double_t xSlope;
+        Double_t xIntercept;
+        Double_t ySlope;
+        Double_t yIntercept;
+    };
+    
+    const std::string outputDir = "result";
+    if (gSystem->AccessPathName(outputDir.c_str())) {
+        if (gSystem->mkdir(outputDir.c_str(), true) != 0) {
+            std::cerr << "错误：无法创建输出目录 " << outputDir << std::endl;
+            return;
+        }
+    }
+    
+    // 数组1: 存储 csiTree 的 TriggerIDMM
+    std::vector<int> triggerIDMMArray;
+    std::map<int, std::vector<CsiData>> csiDataByTrigger;
+    
+    // 读取 result_decode.root 文件中的 csiTree 的 TriggerIDMM
+    std::string datadecodeFile = outputDir + "/result_decode.root";
+    
+    std::cout << "读取文件: " << datadecodeFile << std::endl;
+    
+    TFile *file = TFile::Open(datadecodeFile.c_str(), "READ");
+    if (!file || file->IsZombie()) {
+        std::cerr << "错误：无法打开文件 " << datadecodeFile << std::endl;
+        return;
+    }
+    
+    // 直接获取 csiTree
+    TTree *csiTree = (TTree*)file->Get("csiTree");
+    if (!csiTree) {
+        std::cerr << "错误：无法找到 csiTree" << std::endl;
+        file->Close();
+        delete file;
+        return;
+    }
+    
+    // 检查需要的 branch
+    TBranch *branchTrigger = csiTree->GetBranch("TriggerIDMM");
+    TBranch *branchCellADC = csiTree->GetBranch("CellADC");
+    TBranch *branchCellPLAT = csiTree->GetBranch("CellPLAT");
+    if (!branchTrigger || !branchCellADC || !branchCellPLAT) {
+        std::cerr << "错误：csiTree 中缺少 TriggerIDMM/CellADC/CellPLAT branch" << std::endl;
+        file->Close();
+        delete file;
+        return;
+    }
+    
+    Int_t triggerIDMM;
+    std::vector<int> *cellADCVec = nullptr;
+    std::vector<int> *cellPLATVec = nullptr;
+    csiTree->SetBranchAddress("TriggerIDMM", &triggerIDMM);
+    csiTree->SetBranchAddress("CellADC", &cellADCVec);
+    csiTree->SetBranchAddress("CellPLAT", &cellPLATVec);
+    
+    Long64_t nEntries = csiTree->GetEntries();
+    std::cout << "  Tree: csiTree, 条目数: " << nEntries << std::endl;
+    
+    for (Long64_t i = 0; i < nEntries; i++) {
+        csiTree->GetEntry(i);
+        triggerIDMMArray.push_back(triggerIDMM);
+        if (cellADCVec && cellPLATVec) {
+            CsiData entry;
+            entry.cellADC = *cellADCVec;
+            entry.cellPLAT = *cellPLATVec;
+            csiDataByTrigger[triggerIDMM].push_back(std::move(entry));
+        }
+		// cout triggerIDMM
+		// std::cout << "TriggerID MM : " << triggerIDMM << std::endl;
+    }
+    
+    file->Close();
+    delete file;
+    
+    std::cout << "收集到 " << triggerIDMMArray.size() << " 个 TriggerIDMM" << std::endl;
+    
+    // 数组2: 存储 adas_track_data 文件中的 EventID
+    std::vector<int> eventIDArray;
+    std::map<int, std::vector<AdasData>> adasDataByEvent;
+    
+    // 直接读取指定的文件和 Tree
+    std::string adasFile = outputDir + "/adas_track_data.root";
+    
+    std::cout << "\n读取文件: " << adasFile << std::endl;
+    
+    TFile *adasFilePtr = TFile::Open(adasFile.c_str(), "READ");
+    if (!adasFilePtr || adasFilePtr->IsZombie()) {
+        std::cerr << "错误：无法打开文件 " << adasFile << std::endl;
+        return;
+    }
+    
+    // 直接获取 adas_track_data Tree
+    TTree *adasTree = (TTree*)adasFilePtr->Get("adas_track_data");
+    if (!adasTree) {
+        std::cerr << "错误：无法找到 adas_track_data Tree" << std::endl;
+        adasFilePtr->Close();
+        delete adasFilePtr;
+        return;
+    }
+    
+    auto findBranch = [&](const std::vector<std::string> &candidates, std::string &chosen) -> TBranch* {
+        for (const auto &name : candidates) {
+            TBranch *br = adasTree->GetBranch(name.c_str());
+            if (br) {
+                chosen = name;
+                return br;
+            }
+        }
+        return nullptr;
+    };
+    
+    std::string eventBranchName, xSlopeBranchName, xInterceptBranchName, ySlopeBranchName, yInterceptBranchName;
+    TBranch *branchEvent = findBranch({"event_id", "EventID", "TriggerID"}, eventBranchName);
+    TBranch *branchXSlope = findBranch({"x_slope", "xSlope", "xslope"}, xSlopeBranchName);
+    TBranch *branchXIntercept = findBranch({"x_intercept", "x_Intercept", "xIntercept"}, xInterceptBranchName);
+    TBranch *branchYSlope = findBranch({"y_slope", "ySlope", "yslope"}, ySlopeBranchName);
+    TBranch *branchYIntercept = findBranch({"y_intercept", "y_Intercept", "yIntercept"}, yInterceptBranchName);
+    
+    if (!branchEvent || !branchXSlope || !branchXIntercept || !branchYSlope || !branchYIntercept) {
+        std::cerr << "错误：adas_track_data Tree 中缺少必要 branch（event_id/x_slope/x_intercept/y_slope/y_intercept 的某个变体）" << std::endl;
+        adasFilePtr->Close();
+        delete adasFilePtr;
+        return;
+    }
+    
+    Int_t eventID;
+    Float_t xSlopeF = 0, xInterceptF = 0, ySlopeF = 0, yInterceptF = 0;
+    adasTree->SetBranchAddress(eventBranchName.c_str(), &eventID);
+    adasTree->SetBranchAddress(xSlopeBranchName.c_str(), &xSlopeF);
+    adasTree->SetBranchAddress(xInterceptBranchName.c_str(), &xInterceptF);
+    adasTree->SetBranchAddress(ySlopeBranchName.c_str(), &ySlopeF);
+    adasTree->SetBranchAddress(yInterceptBranchName.c_str(), &yInterceptF);
+    
+    Long64_t nEntriesEvent = adasTree->GetEntries();
+    std::cout << "  Tree: adas_track_data, Branch: event_id, 条目数: " << nEntriesEvent << std::endl;
+    
+    for (Long64_t i = 0; i < nEntriesEvent; i++) {
+        adasTree->GetEntry(i);
+        eventIDArray.push_back(eventID);
+        adasDataByEvent[eventID].push_back(
+            {static_cast<Double_t>(xSlopeF), static_cast<Double_t>(xInterceptF),
+             static_cast<Double_t>(ySlopeF), static_cast<Double_t>(yInterceptF)});
+		// cout eventID
+		// std::cout << "eventID : " << eventID << std::endl;
+    }
+    
+    adasFilePtr->Close();
+    delete adasFilePtr;
+    
+    std::cout << "收集到 " << eventIDArray.size() << " 个 EventID" << std::endl;
+    
+    // 找出公共数字
+    // 将数组转换为 set 以便快速查找
+    std::set<int> triggerIDMMSet(triggerIDMMArray.begin(), triggerIDMMArray.end());
+    std::set<int> eventIDSet(eventIDArray.begin(), eventIDArray.end());
+    
+    // 找出公共数字
+    std::vector<int> commonNumbers;
+    for (int id : triggerIDMMSet) {
+        if (eventIDSet.find(id) != eventIDSet.end()) {
+            commonNumbers.push_back(id);
+        }
+    }
+    
+    // 排序公共数字
+    std::sort(commonNumbers.begin(), commonNumbers.end());
+    
+    // 输出结果
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "统计结果：" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "TriggerIDMM 数组大小: " << triggerIDMMArray.size() << std::endl;
+    std::cout << "EventID 数组大小: " << eventIDArray.size() << std::endl;
+    std::cout << "公共数字数量: " << commonNumbers.size() << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // 输出文件保存公共数据
+    if (!commonNumbers.empty()) {
+        std::string outputFileName = outputDir + "/common_trigger_data.root";
+        TFile *outputFile = TFile::Open(outputFileName.c_str(), "RECREATE");
+        if (!outputFile || outputFile->IsZombie()) {
+            std::cerr << "错误：无法创建输出文件 " << outputFileName << std::endl;
+            delete outputFile;
+            return;
+        }
+        
+        TTree *commonTree = new TTree("commonTree", "Matched trigger data");
+        Int_t outTriggerID = 0;
+        Double_t outXSlope = 0, outXIntercept = 0, outYSlope = 0, outYIntercept = 0;
+        Double_t outXPos = 0, outYPos = 0;
+        std::vector<int> outCellADC;
+        std::vector<int> outCellPLAT;
+        std::vector<int> outCellRealADC;
+        constexpr int gridDivision = 6;
+        constexpr double gridXMin = 155.0;
+        constexpr double gridXMax = 455.0;
+        constexpr double gridYMin = 142.0;
+        constexpr double gridYMax = 442.0;
+        constexpr double gridXSpan = gridXMax - gridXMin;
+        constexpr double gridYSpan = gridYMax - gridYMin;
+        constexpr double gridCellSizeX = gridXSpan / gridDivision;
+        constexpr double gridCellSizeY = gridYSpan / gridDivision;
+        std::vector<std::vector<TH1D*>> gridCellHistograms(
+            gridDivision * gridDivision, std::vector<TH1D*>(8, nullptr));
+        for (int padIndex = 0; padIndex < gridDivision * gridDivision; ++padIndex) {
+            for (int ch = 0; ch < 8; ++ch) {
+                std::string histName =
+                    "CellRealADC_pad" + std::to_string(padIndex) + "_ch" + std::to_string(ch);
+                std::string histTitle =
+                    "Pad " + std::to_string(padIndex) + " channel " + std::to_string(ch);
+                gridCellHistograms[padIndex][ch] =
+                    new TH1D(histName.c_str(), histTitle.c_str(), 200, 200., 3000.);
+                gridCellHistograms[padIndex][ch]->Sumw2();
+            }
+        }
+        
+        commonTree->Branch("TriggerIDMM", &outTriggerID, "TriggerIDMM/I");
+        commonTree->Branch("x_slope", &outXSlope, "x_slope/D");
+        commonTree->Branch("x_intercept", &outXIntercept, "x_intercept/D");
+        commonTree->Branch("y_slope", &outYSlope, "y_slope/D");
+        commonTree->Branch("y_intercept", &outYIntercept, "y_intercept/D");
+        commonTree->Branch("x_pos", &outXPos, "x_pos/D");
+        commonTree->Branch("y_pos", &outYPos, "y_pos/D");
+        commonTree->Branch("CellADC", &outCellADC);
+        commonTree->Branch("CellPLAT", &outCellPLAT);
+        commonTree->Branch("CellRealADC", &outCellRealADC);
+        
+        size_t savedEntries = 0;
+        for (int id : commonNumbers) {
+            const auto &adasVec = adasDataByEvent[id];
+            const auto &csiVec = csiDataByTrigger[id];
+            for (const auto &adasEntry : adasVec) {
+                for (const auto &csiEntry : csiVec) {
+                    outTriggerID = id;
+                    outXSlope = adasEntry.xSlope;
+                    outXIntercept = adasEntry.xIntercept;
+                    outYSlope = adasEntry.ySlope;
+                    outYIntercept = adasEntry.yIntercept;
+                    outXPos = outXSlope * 674.4 + outXIntercept;
+                    outYPos = outYSlope * 674.4 + outYIntercept;
+                    outCellADC = csiEntry.cellADC;
+                    outCellPLAT = csiEntry.cellPLAT;
+                    outCellRealADC.clear();
+                    const size_t nCells = std::min(outCellADC.size(), outCellPLAT.size());
+                    outCellRealADC.reserve(nCells);
+                    bool withinGrid = (outXPos >= gridXMin && outXPos < gridXMax &&
+                                       outYPos >= gridYMin && outYPos < gridYMax);
+                    int padIndex = -1;
+                    if (withinGrid) {
+                        int colFromRight =
+                            static_cast<int>((outXPos - gridXMin) / gridCellSizeX);
+                        int rowFromTop =
+                            static_cast<int>((outYPos - gridYMin) / gridCellSizeY);
+                        colFromRight = std::min(std::max(colFromRight, 0), gridDivision - 1);
+                        rowFromTop = std::min(std::max(rowFromTop, 0), gridDivision - 1);
+                        int colForCanvas = (gridDivision - 1) - colFromRight;
+                        padIndex = rowFromTop * gridDivision + colForCanvas;
+                    }
+                    for (size_t idx = 0; idx < nCells; ++idx) {
+                        int realADC = outCellADC[idx] - outCellPLAT[idx];
+                        outCellRealADC.push_back(realADC);
+                        if (withinGrid && padIndex >= 0 && idx < gridCellHistograms[padIndex].size()) {
+                            if (realADC>300) gridCellHistograms[padIndex][idx]->Fill(realADC);
+                        }
+                    }
+                    commonTree->Fill();
+                    ++savedEntries;
+                }
+            }
+        }
+        
+        commonTree->Write();
+        
+        std::array<int, 8> colorPalette = {kRed + 1, kBlue + 1, kGreen + 2, kMagenta + 1,
+                                           kCyan + 1, kOrange + 7, kGray + 1, kBlack};
+        TCanvas *canvas = new TCanvas("CellRealADCGrid", "CellRealADC grid", 2400, 2400);
+        canvas->Divide(gridDivision, gridDivision);
+        TDirectory *allPadDir = outputFile->mkdir("allPad");
+        if (allPadDir) {
+            allPadDir->cd();
+        }
+        struct CornerCanvasInfo {
+            std::string name;
+            TCanvas *canvas = nullptr;
+            std::vector<int> padIndices;
+        };
+        std::vector<CornerCanvasInfo> cornerCanvases;
+        std::map<int, std::pair<TCanvas*, int>> cornerPadSlots;
+        std::map<int, TLegend*> cornerPadLegends;
+        std::vector<TLegend*> cornerLegendsOwned;
+        auto createCornerCanvas = [&](const std::string &name, int rowStart, int colStart) {
+            CornerCanvasInfo info;
+            info.name = name;
+            info.canvas = new TCanvas(name.c_str(), name.c_str(), 1600, 1600);
+            info.canvas->Divide(3, 3);
+            for (int dr = 0; dr < 3; ++dr) {
+                for (int dc = 0; dc < 3; ++dc) {
+                    int row = rowStart + dr;
+                    int col = colStart + dc;
+                    if (row < gridDivision && col < gridDivision) {
+                        int padIdx = row * gridDivision + col;
+                        info.padIndices.push_back(padIdx);
+                        TLegend *cornerLeg = new TLegend(0.58, 0.62, 0.9, 0.9);
+                        cornerLeg->SetBorderSize(0);
+                        cornerLeg->SetFillStyle(0);
+                        cornerLeg->SetTextSize(0.03);
+                        cornerPadLegends[padIdx] = cornerLeg;
+                        cornerLegendsOwned.push_back(cornerLeg);
+                    }
+                }
+            }
+            cornerCanvases.push_back(std::move(info));
+        };
+        createCornerCanvas("PadCorner_TopLeft", 0, 0);
+        createCornerCanvas("PadCorner_TopRight", 0, 3);
+        createCornerCanvas("PadCorner_BottomLeft", 3, 0);
+        createCornerCanvas("PadCorner_BottomRight", 3, 3);
+        for (auto &corner : cornerCanvases) {
+            for (size_t idx = 0; idx < corner.padIndices.size(); ++idx) {
+                cornerPadSlots[corner.padIndices[idx]] =
+                    {corner.canvas, static_cast<int>(idx)};
+            }
+        }
+        std::vector<char> cornerPadDrawn(gridDivision * gridDivision, 0);
+        for (int padIdx = 0; padIdx < gridDivision * gridDivision; ++padIdx) {
+            canvas->cd(padIdx + 1);
+            gPad->SetTicks();
+            bool firstDrawn = false;
+            bool firstDrawnPad = false;
+            TCanvas *padCanvas = nullptr;
+            TLegend *gridLegend = nullptr;
+            TLegend *padLegend = nullptr;
+            if (allPadDir) {
+                std::string padCanvasName = "pad_" + std::to_string(padIdx);
+                std::string padCanvasTitle = "Pad " + std::to_string(padIdx) + " overlays";
+                padCanvas =
+                    new TCanvas(padCanvasName.c_str(), padCanvasTitle.c_str(), 800, 800);
+                padCanvas->cd();
+                gPad->SetTicks();
+                padLegend = new TLegend(0.58, 0.62, 0.9, 0.9);
+                padLegend->SetBorderSize(0);
+                padLegend->SetFillStyle(0);
+                padLegend->SetTextSize(0.03);
+            }
+            for (int ch = 0; ch < 8; ++ch) {
+                TH1D *hist = gridCellHistograms[padIdx][ch];
+                if (!hist)
+                    continue;
+                hist->SetLineColor(colorPalette[ch % colorPalette.size()]);
+                hist->SetLineWidth(2);
+                hist->SetStats(0);
+                hist->GetXaxis()->SetRangeUser(200., 3000.);
+                hist->GetXaxis()->SetTitle("CellRealADC");
+                hist->GetYaxis()->SetRangeUser(0., 100.);
+                hist->GetYaxis()->SetTitle("Counts");
+                hist->Draw(firstDrawn ? "HIST SAME" : "HIST");
+                firstDrawn = true;
+                if (!gridLegend) {
+                    gridLegend = new TLegend(0.58, 0.62, 0.9, 0.9);
+                    gridLegend->SetBorderSize(0);
+                    gridLegend->SetFillStyle(0);
+                    gridLegend->SetTextSize(0.03);
+                }
+                gridLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                if (padCanvas) {
+                    padCanvas->cd();
+                    hist->Draw(firstDrawnPad ? "HIST SAME" : "HIST");
+                    if (padLegend) {
+                        padLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                    }
+                    firstDrawnPad = true;
+                    canvas->cd(padIdx + 1);
+                }
+                auto cornerIt = cornerPadSlots.find(padIdx);
+                if (cornerIt != cornerPadSlots.end()) {
+                    TCanvas *cornerCanvas = cornerIt->second.first;
+                    int slot = cornerIt->second.second;
+                    if (cornerCanvas) {
+                        cornerCanvas->cd(slot + 1);
+                        gPad->SetTicks();
+                        char &drawnFlag = cornerPadDrawn[padIdx];
+                        hist->Draw(drawnFlag ? "HIST SAME" : "HIST");
+                        auto legIt = cornerPadLegends.find(padIdx);
+                        if (legIt != cornerPadLegends.end() && legIt->second) {
+                            legIt->second->AddEntry(hist, Form("ch%d", ch), "L");
+                        }
+                        drawnFlag = 1;
+                        canvas->cd(padIdx + 1);
+                    }
+                }
+            }
+            if (gridLegend && firstDrawn) {
+                gridLegend->Draw();
+            }
+            if (padLegend && firstDrawnPad) {
+                padCanvas->cd();
+                padLegend->Draw();
+                canvas->cd(padIdx + 1);
+            }
+            auto cornerLegendIt = cornerPadLegends.find(padIdx);
+            auto cornerSlotIt = cornerPadSlots.find(padIdx);
+            if (cornerLegendIt != cornerPadLegends.end() && cornerSlotIt != cornerPadSlots.end() &&
+                cornerLegendIt->second && cornerPadDrawn[padIdx]) {
+                TCanvas *cornerCanvas = cornerSlotIt->second.first;
+                int slot = cornerSlotIt->second.second;
+                cornerCanvas->cd(slot + 1);
+                cornerLegendIt->second->Draw();
+                canvas->cd(padIdx + 1);
+            }
+            if (padCanvas) {
+                padCanvas->Write();
+                delete padCanvas;
+                if (allPadDir) {
+                    allPadDir->cd();
+                }
+            }
+        }
+        canvas->SaveAs((outputDir + "/CellRealADC_grid.pdf").c_str());
+        for (const auto &corner : cornerCanvases) {
+            if (corner.canvas) {
+                corner.canvas->SaveAs((outputDir + "/" + corner.name + ".pdf").c_str());
+            }
+        }
+        
+        TDirectory *histDirectory = outputFile->mkdir("CellRealADCHistograms");
+        if (histDirectory) {
+            histDirectory->cd();
+        }
+        TDirectory *cornerDir = outputFile->mkdir("PadCornerCanvases");
+        if (cornerDir) {
+            cornerDir->cd();
+            for (const auto &corner : cornerCanvases) {
+                if (corner.canvas) {
+                    corner.canvas->Write();
+                }
+            }
+            outputFile->cd();
+        }
+        for (const auto &padVec : gridCellHistograms) {
+            for (TH1D *hist : padVec) {
+                if (!hist)
+                    continue;
+                hist->Write();
+                delete hist;
+            }
+        }
+        outputFile->cd();
+        delete canvas;
+        for (const auto &corner : cornerCanvases) {
+            if (corner.canvas) {
+                delete corner.canvas;
+            }
+        }
+        for (TLegend *leg : cornerLegendsOwned) {
+            delete leg;
+        }
+        outputFile->Close();
+        delete outputFile;
+        std::cout << "匹配数据已保存至 " << outputFileName << "，共写入 " << savedEntries << " 条记录。" << std::endl;
+    } else {
+        std::cout << "未找到需要保存的数据，未创建输出文件。" << std::endl;
+    }
+    
+}
