@@ -13,4 +13,4 @@ micromegas_ana/mmdata/*.root
 # Raw / intermediate data
 # ================================
 vdecode/data/**
-vdcode/result/**
+vdecode/result/**
