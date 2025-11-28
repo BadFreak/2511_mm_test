@@ -1,0 +1,9 @@
+Error in <TFile::TFile>: file /mnt2/USTC/jxwang/VLAST-P/2511_mm_csi/vdecode/result/CsITK_cosmic_20251127_1344/hist.root does not exist
+Traceback (most recent call last):
+  File "/mnt2/USTC/jxwang/VLAST-P/2511_mm_csi/vdecode/result/CsITK_cosmic_20251127_1344/../../VPlot.py", line 680, in <module>
+    plot_all()
+  File "/mnt2/USTC/jxwang/VLAST-P/2511_mm_csi/vdecode/result/CsITK_cosmic_20251127_1344/../../VPlot.py", line 558, in plot_all
+    infile = ROOT.TFile.Open("hist.root","READ")
+  File "/mnt/software/anaconda3/envs/cepc/lib/python3.9/site-packages/ROOT/_pythonization/_tfile.py", line 104, in _TFileOpen
+    raise OSError('Failed to open file {}'.format(str(args[0])))
+OSError: Failed to open file hist.root

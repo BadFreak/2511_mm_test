@@ -1,0 +1,3 @@
+
+Processing ../../draw.cxx(1, "result_CsITK_cosmic_20251127_1344.root")...
+Fatal glibc error: malloc.c:2492 (sysmalloc): assertion failed: (old_top == initial_top (av) && old_size == 0) || ((unsigned long) (old_size) >= MINSIZE && prev_inuse (old_top) && ((unsigned long) old_end & (pagesize - 1)) == 0)
