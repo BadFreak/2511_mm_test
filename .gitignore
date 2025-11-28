@@ -8,9 +8,13 @@
 # ================================
 micromegas_ana/decodedata/*.root
 micromegas_ana/mmdata/*.root
+!micromegas_ana/decodedata/.gitkeep
+!micromegas_ana/mmdata/*.gitkeep
 
 # ================================
 # Raw / intermediate data
 # ================================
 vdecode/data/**
 vdecode/result/**
+!vdecode/data/.gitkeep
+!vdecode/result/.gitkeep
