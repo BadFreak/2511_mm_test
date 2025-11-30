@@ -17,6 +17,7 @@
 #include "TMath.h"
 #include "TString.h"
 #include "TLegend.h"
+#include "TF1.h"
 
 // Landau ⊗ Gaussian helper (aka Langau).
 Double_t LandauGauss(Double_t *x, Double_t *par) {
@@ -44,7 +45,7 @@ Double_t LandauGauss(Double_t *x, Double_t *par) {
     return amplitude * step * invSqrt2Pi / gaussSigma * sum;
 }
 
-void ana() {
+void ana(std::string option) {
     struct CsiData {
         std::vector<int> cellADC;
         std::vector<int> cellPLAT;
@@ -56,7 +57,7 @@ void ana() {
         Double_t yIntercept;
     };
     
-    const std::string outputDir = "result";
+    const std::string outputDir = "result/result" + option;
     if (gSystem->AccessPathName(outputDir.c_str())) {
         if (gSystem->mkdir(outputDir.c_str(), true) != 0) {
             std::cerr << "错误：无法创建输出目录 " << outputDir << std::endl;
@@ -69,7 +70,7 @@ void ana() {
     std::map<int, std::vector<CsiData>> csiDataByTrigger;
     
     // 读取 result_decode.root 文件中的 csiTree 的 TriggerIDMM
-    std::string datadecodeFile = outputDir + "/result_decode.root";
+    std::string datadecodeFile = outputDir + "/result_decode" + option + ".root";
     
     std::cout << "读取文件: " << datadecodeFile << std::endl;
     
@@ -132,7 +133,7 @@ void ana() {
     std::map<int, std::vector<AdasData>> adasDataByEvent;
     
     // 直接读取指定的文件和 Tree
-    std::string adasFile = outputDir + "/adas_track_data.root";
+    std::string adasFile = outputDir + "/adas_track_data" + option + ".root";
     
     std::cout << "\n读取文件: " << adasFile << std::endl;
     
@@ -229,7 +230,7 @@ void ana() {
     
     // 输出文件保存公共数据
     if (!commonNumbers.empty()) {
-        std::string outputFileName = outputDir + "/common_trigger_data.root";
+        std::string outputFileName = outputDir + "/common_trigger_data_" + option + ".root";
         TFile *outputFile = TFile::Open(outputFileName.c_str(), "RECREATE");
         if (!outputFile || outputFile->IsZombie()) {
             std::cerr << "错误：无法创建输出文件 " << outputFileName << std::endl;
@@ -244,15 +245,21 @@ void ana() {
         std::vector<int> outCellADC;
         std::vector<int> outCellPLAT;
         std::vector<int> outCellRealADC;
-        constexpr int gridDivision = 6;
-        constexpr double gridXMin = 155.0;
-        constexpr double gridXMax = 455.0;
-        constexpr double gridYMin = 142.0;
-        constexpr double gridYMax = 442.0;
+        constexpr int gridDivision = 10;
+        // constexpr double gridXMin = 155.0;
+        // constexpr double gridXMax = 455.0;
+        constexpr double gridXMin = 160.0;
+		constexpr double gridXMax = 460.0;
+		constexpr double gridYMin = 140.5;
+        constexpr double gridYMax = 440.5;
         constexpr double gridXSpan = gridXMax - gridXMin;
         constexpr double gridYSpan = gridYMax - gridYMin;
         constexpr double gridCellSizeX = gridXSpan / gridDivision;
         constexpr double gridCellSizeY = gridYSpan / gridDivision;
+        TH2D *xyDistribution =
+            new TH2D("XYDistribution", "Reconstructed XY;X position (mm);Y position (mm)",
+                     gridDivision * 5, gridXMin, gridXMax, gridDivision * 5, gridYMin, gridYMax);
+        xyDistribution->SetStats(0);
         std::vector<std::vector<TH1D*>> gridCellHistograms(
             gridDivision * gridDivision, std::vector<TH1D*>(8, nullptr));
         for (int padIndex = 0; padIndex < gridDivision * gridDivision; ++padIndex) {
@@ -291,6 +298,9 @@ void ana() {
                     outYIntercept = adasEntry.yIntercept;
                     outXPos = outXSlope * 674.4 + outXIntercept;
                     outYPos = outYSlope * 674.4 + outYIntercept;
+                    if (xyDistribution) {
+                        xyDistribution->Fill(outXPos, outYPos);
+                    }
                     outCellADC = csiEntry.cellADC;
                     outCellPLAT = csiEntry.cellPLAT;
                     outCellRealADC.clear();
@@ -337,6 +347,7 @@ void ana() {
             TCanvas *canvas = nullptr;
             std::vector<int> padIndices;
         };
+        const int cornerBlock = gridDivision / 2;
         std::vector<CornerCanvasInfo> cornerCanvases;
         std::map<int, std::pair<TCanvas*, int>> cornerPadSlots;
         std::map<int, TLegend*> cornerPadLegends;
@@ -345,9 +356,9 @@ void ana() {
             CornerCanvasInfo info;
             info.name = name;
             info.canvas = new TCanvas(name.c_str(), name.c_str(), 1600, 1600);
-            info.canvas->Divide(3, 3);
-            for (int dr = 0; dr < 3; ++dr) {
-                for (int dc = 0; dc < 3; ++dc) {
+            info.canvas->Divide(cornerBlock, cornerBlock);
+            for (int dr = 0; dr < cornerBlock; ++dr) {
+                for (int dc = 0; dc < cornerBlock; ++dc) {
                     int row = rowStart + dr;
                     int col = colStart + dc;
                     if (row < gridDivision && col < gridDivision) {
@@ -365,9 +376,10 @@ void ana() {
             cornerCanvases.push_back(std::move(info));
         };
         createCornerCanvas("PadCorner_TopLeft", 0, 0);
-        createCornerCanvas("PadCorner_TopRight", 0, 3);
-        createCornerCanvas("PadCorner_BottomLeft", 3, 0);
-        createCornerCanvas("PadCorner_BottomRight", 3, 3);
+        createCornerCanvas("PadCorner_TopRight", 0, gridDivision - cornerBlock);
+        createCornerCanvas("PadCorner_BottomLeft", gridDivision - cornerBlock, 0);
+        createCornerCanvas("PadCorner_BottomRight", gridDivision - cornerBlock,
+                           gridDivision - cornerBlock);
         for (auto &corner : cornerCanvases) {
             for (size_t idx = 0; idx < corner.padIndices.size(); ++idx) {
                 cornerPadSlots[corner.padIndices[idx]] =
@@ -404,7 +416,7 @@ void ana() {
                 hist->SetStats(0);
                 hist->GetXaxis()->SetRangeUser(200., 3000.);
                 hist->GetXaxis()->SetTitle("CellRealADC");
-                hist->GetYaxis()->SetRangeUser(0., 100.);
+                hist->GetYaxis()->SetRangeUser(0., 50.);
                 hist->GetYaxis()->SetTitle("Counts");
                 hist->Draw(firstDrawn ? "HIST SAME" : "HIST");
                 firstDrawn = true;
@@ -475,10 +487,7 @@ void ana() {
             }
         }
         
-        TDirectory *histDirectory = outputFile->mkdir("CellRealADCHistograms");
-        if (histDirectory) {
-            histDirectory->cd();
-        }
+        outputFile->cd();
         TDirectory *cornerDir = outputFile->mkdir("PadCornerCanvases");
         if (cornerDir) {
             cornerDir->cd();
@@ -489,13 +498,21 @@ void ana() {
             }
             outputFile->cd();
         }
-        for (const auto &padVec : gridCellHistograms) {
-            for (TH1D *hist : padVec) {
-                if (!hist)
-                    continue;
-                hist->Write();
-                delete hist;
-            }
+		TDirectory *histDirectory = outputFile->mkdir("CellRealADCHistograms");
+        if (histDirectory) {
+            histDirectory->cd();
+			for (const auto &padVec : gridCellHistograms) {
+				for (TH1D *hist : padVec) {
+					if (!hist)
+						continue;
+					hist->Write();
+					delete hist;
+				}
+			}
+        }
+        if (xyDistribution) {
+            outputFile->cd();
+            xyDistribution->Write();
         }
         outputFile->cd();
         delete canvas;
@@ -507,6 +524,7 @@ void ana() {
         for (TLegend *leg : cornerLegendsOwned) {
             delete leg;
         }
+        delete xyDistribution;
         outputFile->Close();
         delete outputFile;
         std::cout << "匹配数据已保存至 " << outputFileName << "，共写入 " << savedEntries << " 条记录。" << std::endl;

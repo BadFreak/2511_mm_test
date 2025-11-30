@@ -6,15 +6,15 @@
 # ================================
 # ROOT data files
 # ================================
-micromegas_ana/decodedata/*.root
-micromegas_ana/mmdata/*.root
-!micromegas_ana/decodedata/.gitkeep
-!micromegas_ana/mmdata/*.gitkeep
+micromegas_ana/data/decodedata/
+micromegas_ana/data/mmdata/
+!micromegas_ana/data/decodedata/.gitkeep
+!micromegas_ana/data/mmdata/*.gitkeep
 
 # ================================
 # Raw / intermediate data
 # ================================
-vdecode/data/**
+vdecode/data*/
 vdecode/result/**
 !vdecode/data/.gitkeep
 !vdecode/result/.gitkeep
