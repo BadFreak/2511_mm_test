@@ -8,13 +8,15 @@
 # ================================
 micromegas_ana/data/decodedata/
 micromegas_ana/data/mmdata/
+micromegas_ana/result/
 !micromegas_ana/data/decodedata/.gitkeep
-!micromegas_ana/data/mmdata/*.gitkeep
+!micromegas_ana/data/mmdata/.gitkeep
+!micromegas_ana/result/.gitkeep
 
 # ================================
 # Raw / intermediate data
 # ================================
-vdecode/data*/
-vdecode/result/**
+vdecode/data/
+vdecode/result/
 !vdecode/data/.gitkeep
 !vdecode/result/.gitkeep

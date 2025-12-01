@@ -18,6 +18,7 @@
 #include "TString.h"
 #include "TLegend.h"
 #include "TF1.h"
+#include "TText.h"
 
 // Landau ⊗ Gaussian helper (aka Langau).
 Double_t LandauGauss(Double_t *x, Double_t *par) {
@@ -246,6 +247,7 @@ void ana(std::string option) {
         std::vector<int> outCellPLAT;
         std::vector<int> outCellRealADC;
         constexpr int gridDivision = 10;
+        constexpr int cornerBlock = gridDivision / 2;
         // constexpr double gridXMin = 155.0;
         // constexpr double gridXMax = 455.0;
         constexpr double gridXMin = 160.0;
@@ -336,6 +338,169 @@ void ana(std::string option) {
         
         std::array<int, 8> colorPalette = {kRed + 1, kBlue + 1, kGreen + 2, kMagenta + 1,
                                            kCyan + 1, kOrange + 7, kGray + 1, kBlack};
+        
+        // 对每个 gridCellHistograms 进行 Landau-Gaussian 拟合
+        std::vector<std::vector<TF1*>> fitFunctions(
+            gridDivision * gridDivision, std::vector<TF1*>(8, nullptr));
+        // 存储 MPV 值：padIndex -> channel -> MPV
+        std::vector<std::vector<Double_t>> mpvValues(
+            gridDivision * gridDivision, std::vector<Double_t>(8, 0.0));
+        for (int padIndex = 0; padIndex < gridDivision * gridDivision; ++padIndex) {
+            for (int ch = 0; ch < 8; ++ch) {
+                TH1D *hist = gridCellHistograms[padIndex][ch];
+                if (!hist || hist->GetEntries() < 300) {
+                    continue;  // 只对 entries >= 300 的进行拟合
+                }
+                
+                // 获取 histogram 的最大值位置作为初始 MPV
+                Int_t maxBin = hist->GetMaximumBin();
+                Double_t maxX = hist->GetXaxis()->GetBinCenter(maxBin);
+                Double_t maxY = hist->GetBinContent(maxBin);
+                
+                // 估算初始参数
+                Double_t mpv = maxX;
+                Double_t landauWidth = 100.0;  // 初始 Landau 宽度
+                Double_t gaussSigma = 50.0;     // 初始高斯 sigma
+                Double_t amplitude = maxY * 50.0;  // 初始幅度
+                
+                // 创建拟合函数
+                std::string fitName = "fit_pad" + std::to_string(padIndex) + "_ch" + std::to_string(ch);
+                TF1 *fitFunc = new TF1(fitName.c_str(), LandauGauss, 200., 3000., 4);
+                fitFunc->SetParameters(mpv, landauWidth, gaussSigma, amplitude);
+                fitFunc->SetParNames("MPV", "LandauWidth", "GaussSigma", "Amplitude");
+                
+                // 设置参数范围
+                fitFunc->SetParLimits(0, 200., 3000.);      // MPV
+                fitFunc->SetParLimits(1, 10., 500.);       // LandauWidth
+                fitFunc->SetParLimits(2, 10., 200.);       // GaussSigma
+                fitFunc->SetParLimits(3, 0., amplitude * 10.);  // Amplitude
+                
+                // 使用 histogram 本身的颜色
+                Int_t histColor = colorPalette[ch % colorPalette.size()];
+                fitFunc->SetLineColor(histColor);
+                fitFunc->SetLineWidth(2);
+                fitFunc->SetLineStyle(2);  // 虚线
+                
+                // 执行拟合
+                Int_t fitStatus = hist->Fit(fitFunc, "QN0", "", 200., 3000.);
+                if (fitStatus == 0) {
+                    fitFunctions[padIndex][ch] = fitFunc;
+                    // 获取拟合得到的 MPV 值
+                    mpvValues[padIndex][ch] = fitFunc->GetParameter(0);
+                } else {
+                    delete fitFunc;
+                }
+            }
+        }
+        
+        // 创建 MPV 统计的 canvas 和 TH2D
+        struct MPVCornerInfo {
+            std::string name;
+            TCanvas *canvas = nullptr;
+            std::vector<TH2D*> th2dChannels;  // 2 个 TH2D，每个对应一个 channel
+            std::vector<int> channels;  // 该 corner 对应的 channel 编号
+            int rowStart;
+            int colStart;
+        };
+        std::vector<MPVCornerInfo> mpvCornerCanvases;
+        
+        // 定义 4 个 corner 的位置和对应的 channel
+        struct CornerDef {
+            std::string name;
+            int rowStart;
+            int colStart;
+            std::vector<int> channels;
+        };
+        std::vector<CornerDef> cornerDefs = {
+            {"MPV_TopLeft", 0, 0, {2, 3}},
+            {"MPV_TopRight", 0, gridDivision - cornerBlock, {0, 1}},
+            {"MPV_BottomLeft", gridDivision - cornerBlock, 0, {6, 7}},
+            {"MPV_BottomRight", gridDivision - cornerBlock, gridDivision - cornerBlock, {4, 5}}
+        };
+        
+        // 创建 4 个 corner canvas，每个有 2 个 pad（对应 2 个 channel）
+        for (const auto &cornerDef : cornerDefs) {
+            MPVCornerInfo cornerInfo;
+            cornerInfo.name = cornerDef.name;
+            cornerInfo.rowStart = cornerDef.rowStart;
+            cornerInfo.colStart = cornerDef.colStart;
+            cornerInfo.channels = cornerDef.channels;
+            cornerInfo.canvas = new TCanvas(cornerInfo.name.c_str(), 
+                (cornerInfo.name + " MPV Distribution").c_str(), 1600, 800);
+            cornerInfo.canvas->Divide(2, 1);  // 2 列 1 行，横向排列，共 2 个 pad
+            
+            // 计算该 corner 的物理位置范围
+            Double_t cornerXMin = gridXMin + cornerInfo.colStart * gridCellSizeX;
+            Double_t cornerXMax = gridXMin + (cornerInfo.colStart + cornerBlock) * gridCellSizeX;
+            Double_t cornerYMin = gridYMin + cornerInfo.rowStart * gridCellSizeY;
+            Double_t cornerYMax = gridYMin + (cornerInfo.rowStart + cornerBlock) * gridCellSizeY;
+            
+            // 为每个 channel 创建 TH2D（使用物理位置坐标）
+            for (int ch : cornerInfo.channels) {
+                std::string th2dName = cornerInfo.name + "_ch" + std::to_string(ch);
+                std::string th2dTitle = cornerInfo.name + " Channel " + std::to_string(ch) + " MPV;X position (mm);Y position (mm)";
+                TH2D *th2d = new TH2D(th2dName.c_str(), th2dTitle.c_str(),
+                    cornerBlock, cornerXMin, cornerXMax, cornerBlock, cornerYMin, cornerYMax);
+                th2d->SetStats(0);
+                cornerInfo.th2dChannels.push_back(th2d);
+            }
+            
+            // 填充 TH2D：遍历该 corner 的所有 pad
+            for (int dr = 0; dr < cornerBlock; ++dr) {
+                for (int dc = 0; dc < cornerBlock; ++dc) {
+                    int row = cornerInfo.rowStart + dr;
+                    int col = cornerInfo.colStart + dc;
+                    if (row < gridDivision && col < gridDivision) {
+                        int padIdx = row * gridDivision + col;
+                        // 计算该 pad 的物理位置（中心点）
+                        Double_t padX = gridXMin + (col + 0.5) * gridCellSizeX;
+                        Double_t padY = gridYMin + (row + 0.5) * gridCellSizeY;
+                        
+                        // 对于该 corner 的每个 channel，填充 MPV 值
+                        for (size_t chIdx = 0; chIdx < cornerInfo.channels.size(); ++chIdx) {
+                            int ch = cornerInfo.channels[chIdx];
+                            Double_t mpv = mpvValues[padIdx][ch];
+                            if (mpv > 0) {  // 只填充有效的 MPV 值
+                                TH2D *th2d = cornerInfo.th2dChannels[chIdx];
+                                th2d->Fill(padX, padY, mpv);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            mpvCornerCanvases.push_back(std::move(cornerInfo));
+        }
+        
+        // 绘制 MPV TH2D 并标注数值
+        for (auto &cornerInfo : mpvCornerCanvases) {
+            for (size_t chIdx = 0; chIdx < cornerInfo.channels.size(); ++chIdx) {
+                int ch = cornerInfo.channels[chIdx];
+                cornerInfo.canvas->cd(chIdx + 1);
+                gPad->SetTicks();
+                TH2D *th2d = cornerInfo.th2dChannels[chIdx];
+                th2d->Draw("COLZ");
+                
+                // 在 TH2D 上标注 MPV 值
+                for (int binX = 1; binX <= cornerBlock; ++binX) {
+                    for (int binY = 1; binY <= cornerBlock; ++binY) {
+                        Double_t mpv = th2d->GetBinContent(binX, binY);
+                        if (mpv > 0) {
+                            // 获取 bin 的中心坐标（物理位置）
+                            Double_t x = th2d->GetXaxis()->GetBinCenter(binX);
+                            Double_t y = th2d->GetYaxis()->GetBinCenter(binY);
+                            // 创建文本标签
+                            TText *text = new TText(x, y, Form("%.0f", mpv));
+                            text->SetTextAlign(22);  // 居中
+                            text->SetTextSize(0.03);
+                            text->SetTextColor(kBlack);
+                            text->Draw();
+                        }
+                    }
+                }
+            }
+        }
+        
         TCanvas *canvas = new TCanvas("CellRealADCGrid", "CellRealADC grid", 2400, 2400);
         canvas->Divide(gridDivision, gridDivision);
         TDirectory *allPadDir = outputFile->mkdir("allPad");
@@ -347,7 +512,6 @@ void ana(std::string option) {
             TCanvas *canvas = nullptr;
             std::vector<int> padIndices;
         };
-        const int cornerBlock = gridDivision / 2;
         std::vector<CornerCanvasInfo> cornerCanvases;
         std::map<int, std::pair<TCanvas*, int>> cornerPadSlots;
         std::map<int, TLegend*> cornerPadLegends;
@@ -364,10 +528,10 @@ void ana(std::string option) {
                     if (row < gridDivision && col < gridDivision) {
                         int padIdx = row * gridDivision + col;
                         info.padIndices.push_back(padIdx);
-                        TLegend *cornerLeg = new TLegend(0.58, 0.62, 0.9, 0.9);
+                        TLegend *cornerLeg = new TLegend(0.35, 0.45, 0.77, 0.75);
                         cornerLeg->SetBorderSize(0);
                         cornerLeg->SetFillStyle(0);
-                        cornerLeg->SetTextSize(0.03);
+                        cornerLeg->SetTextSize(0.05);
                         cornerPadLegends[padIdx] = cornerLeg;
                         cornerLegendsOwned.push_back(cornerLeg);
                     }
@@ -419,6 +583,11 @@ void ana(std::string option) {
                 hist->GetYaxis()->SetRangeUser(0., 50.);
                 hist->GetYaxis()->SetTitle("Counts");
                 hist->Draw(firstDrawn ? "HIST SAME" : "HIST");
+                // 绘制拟合曲线
+                TF1 *fitFunc = fitFunctions[padIdx][ch];
+                if (fitFunc) {
+                    fitFunc->Draw("SAME");
+                }
                 firstDrawn = true;
                 if (!gridLegend) {
                     gridLegend = new TLegend(0.58, 0.62, 0.9, 0.9);
@@ -426,12 +595,28 @@ void ana(std::string option) {
                     gridLegend->SetFillStyle(0);
                     gridLegend->SetTextSize(0.03);
                 }
-                gridLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                // 在 legend 中显示 MPV 值
+                Double_t mpv = mpvValues[padIdx][ch];
+                if (mpv > 0) {
+                    gridLegend->AddEntry(hist, Form("ch%d MPV=%.0f", ch, mpv), "L");
+                } else {
+                    gridLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                }
                 if (padCanvas) {
                     padCanvas->cd();
                     hist->Draw(firstDrawnPad ? "HIST SAME" : "HIST");
+                    // 在 padCanvas 上也绘制拟合曲线
+                    if (fitFunc) {
+                        fitFunc->Draw("SAME");
+                    }
                     if (padLegend) {
-                        padLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                        // 在 legend 中显示 MPV 值
+                        Double_t mpv = mpvValues[padIdx][ch];
+                        if (mpv > 0) {
+                            padLegend->AddEntry(hist, Form("ch%d MPV=%.0f", ch, mpv), "L");
+                        } else {
+                            padLegend->AddEntry(hist, Form("ch%d", ch), "L");
+                        }
                     }
                     firstDrawnPad = true;
                     canvas->cd(padIdx + 1);
@@ -445,9 +630,19 @@ void ana(std::string option) {
                         gPad->SetTicks();
                         char &drawnFlag = cornerPadDrawn[padIdx];
                         hist->Draw(drawnFlag ? "HIST SAME" : "HIST");
+                        // 在 cornerCanvas 上也绘制拟合曲线
+                        if (fitFunc) {
+                            fitFunc->Draw("SAME");
+                        }
                         auto legIt = cornerPadLegends.find(padIdx);
                         if (legIt != cornerPadLegends.end() && legIt->second) {
-                            legIt->second->AddEntry(hist, Form("ch%d", ch), "L");
+                            // 在 legend 中显示 MPV 值
+                            Double_t mpv = mpvValues[padIdx][ch];
+                            if (mpv > 0) {
+                                legIt->second->AddEntry(hist, Form("ch%d MPV=%.0f", ch, mpv), "L");
+                            } else {
+                                legIt->second->AddEntry(hist, Form("ch%d", ch), "L");
+                            }
                         }
                         drawnFlag = 1;
                         canvas->cd(padIdx + 1);
@@ -486,6 +681,12 @@ void ana(std::string option) {
                 corner.canvas->SaveAs((outputDir + "/" + corner.name + ".pdf").c_str());
             }
         }
+        // 保存 MPV canvas 为 PDF
+        for (const auto &mpvCorner : mpvCornerCanvases) {
+            if (mpvCorner.canvas) {
+                mpvCorner.canvas->SaveAs((outputDir + "/" + mpvCorner.name + ".pdf").c_str());
+            }
+        }
         
         outputFile->cd();
         TDirectory *cornerDir = outputFile->mkdir("PadCornerCanvases");
@@ -498,14 +699,37 @@ void ana(std::string option) {
             }
             outputFile->cd();
         }
+        // 保存 MPV canvas 和 TH2D
+        TDirectory *mpvDir = outputFile->mkdir("MPVCornerCanvases");
+        if (mpvDir) {
+            mpvDir->cd();
+            for (const auto &mpvCorner : mpvCornerCanvases) {
+                if (mpvCorner.canvas) {
+                    mpvCorner.canvas->Write();
+                }
+                // 保存每个 channel 的 TH2D
+                for (TH2D *th2d : mpvCorner.th2dChannels) {
+                    if (th2d) {
+                        th2d->Write();
+                    }
+                }
+            }
+            outputFile->cd();
+        }
 		TDirectory *histDirectory = outputFile->mkdir("CellRealADCHistograms");
         if (histDirectory) {
             histDirectory->cd();
-			for (const auto &padVec : gridCellHistograms) {
-				for (TH1D *hist : padVec) {
+			for (size_t padIdx = 0; padIdx < gridCellHistograms.size(); ++padIdx) {
+				for (size_t ch = 0; ch < gridCellHistograms[padIdx].size(); ++ch) {
+					TH1D *hist = gridCellHistograms[padIdx][ch];
 					if (!hist)
 						continue;
 					hist->Write();
+					// 保存拟合函数
+					TF1 *fitFunc = fitFunctions[padIdx][ch];
+					if (fitFunc) {
+						fitFunc->Write();
+					}
 					delete hist;
 				}
 			}
@@ -524,9 +748,28 @@ void ana(std::string option) {
         for (TLegend *leg : cornerLegendsOwned) {
             delete leg;
         }
+        // 清理 MPV canvas 和 TH2D
+        for (auto &mpvCorner : mpvCornerCanvases) {
+            if (mpvCorner.canvas) {
+                delete mpvCorner.canvas;
+            }
+            for (TH2D *th2d : mpvCorner.th2dChannels) {
+                if (th2d) {
+                    delete th2d;
+                }
+            }
+        }
         delete xyDistribution;
         outputFile->Close();
         delete outputFile;
+        // 清理拟合函数
+        for (auto &padVec : fitFunctions) {
+            for (TF1 *fitFunc : padVec) {
+                if (fitFunc) {
+                    delete fitFunc;
+                }
+            }
+        }
         std::cout << "匹配数据已保存至 " << outputFileName << "，共写入 " << savedEntries << " 条记录。" << std::endl;
     } else {
         std::cout << "未找到需要保存的数据，未创建输出文件。" << std::endl;
