@@ -20,10 +20,10 @@ for dat in "$datadir"/*.dat; do
     prefix="${filename%.dat}"
 	echo "Processing $filename"
     curr_out="$outdir/$prefix"
-	# if [ -f "$curr_out/result_${prefix}.root" ]; then
-    #     echo "[Skip] $curr_out 已存在，跳过处理"
-    #     continue
-    # fi
+	if [ -f "$curr_out/result_${prefix}.root" ]; then
+        echo "[Skip] $curr_out 已存在，跳过处理"
+        continue
+    fi
     mkdir -p "$curr_out"
     
     # decode

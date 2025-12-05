@@ -19,6 +19,7 @@
 #include "TLegend.h"
 #include "TF1.h"
 #include "TText.h"
+#include "TLatex.h"
 
 // Landau ⊗ Gaussian helper (aka Langau).
 Double_t LandauGauss(Double_t *x, Double_t *par) {
@@ -245,7 +246,7 @@ void ana(std::string option) {
         Double_t outXPos = 0, outYPos = 0;
         std::vector<int> outCellADC;
         std::vector<int> outCellPLAT;
-        std::vector<int> outCellRealADC;
+        std::vector<Double_t> outCellRealADC;
         constexpr int gridDivision = 10;
         constexpr int cornerBlock = gridDivision / 2;
         // constexpr double gridXMin = 155.0;
@@ -308,6 +309,8 @@ void ana(std::string option) {
                     outCellRealADC.clear();
                     const size_t nCells = std::min(outCellADC.size(), outCellPLAT.size());
                     outCellRealADC.reserve(nCells);
+                    // 计算角度修正因子：sqrt(1 + x_slope² + y_slope²)
+                    Double_t lengthFactor = TMath::Sqrt(1.0 + outXSlope * outXSlope + outYSlope * outYSlope);
                     bool withinGrid = (outXPos >= gridXMin && outXPos < gridXMax &&
                                        outYPos >= gridYMin && outYPos < gridYMax);
                     int padIndex = -1;
@@ -322,7 +325,10 @@ void ana(std::string option) {
                         padIndex = rowFromTop * gridDivision + colForCanvas;
                     }
                     for (size_t idx = 0; idx < nCells; ++idx) {
-                        int realADC = outCellADC[idx] - outCellPLAT[idx];
+                        // 计算原始 realADC
+                        Double_t realADC = static_cast<Double_t>(outCellADC[idx] - outCellPLAT[idx]);
+                        // 应用角度修正：除以路径长度因子
+                        realADC /= lengthFactor;
                         outCellRealADC.push_back(realADC);
                         if (withinGrid && padIndex >= 0 && idx < gridCellHistograms[padIndex].size()) {
                             if (realADC>300) gridCellHistograms[padIndex][idx]->Fill(realADC);
@@ -393,113 +399,224 @@ void ana(std::string option) {
             }
         }
         
-        // 创建 MPV 统计的 canvas 和 TH2D
-        struct MPVCornerInfo {
-            std::string name;
-            TCanvas *canvas = nullptr;
-            std::vector<TH2D*> th2dChannels;  // 2 个 TH2D，每个对应一个 channel
-            std::vector<int> channels;  // 该 corner 对应的 channel 编号
+        // 创建8个TH2D，每个channel对应其corner区域的MPV分布
+        std::vector<TH2D*> mpvChannelTH2D(8, nullptr);
+        
+        // 定义每个channel的corner信息
+        struct ChannelCornerInfo {
             int rowStart;
             int colStart;
-        };
-        std::vector<MPVCornerInfo> mpvCornerCanvases;
-        
-        // 定义 4 个 corner 的位置和对应的 channel
-        struct CornerDef {
-            std::string name;
-            int rowStart;
-            int colStart;
-            std::vector<int> channels;
-        };
-        std::vector<CornerDef> cornerDefs = {
-            {"MPV_TopLeft", 0, 0, {2, 3}},
-            {"MPV_TopRight", 0, gridDivision - cornerBlock, {0, 1}},
-            {"MPV_BottomLeft", gridDivision - cornerBlock, 0, {6, 7}},
-            {"MPV_BottomRight", gridDivision - cornerBlock, gridDivision - cornerBlock, {4, 5}}
+            Double_t xMin, xMax;
+            Double_t yMin, yMax;
+            std::string cornerName;
         };
         
-        // 创建 4 个 corner canvas，每个有 2 个 pad（对应 2 个 channel）
-        for (const auto &cornerDef : cornerDefs) {
-            MPVCornerInfo cornerInfo;
-            cornerInfo.name = cornerDef.name;
-            cornerInfo.rowStart = cornerDef.rowStart;
-            cornerInfo.colStart = cornerDef.colStart;
-            cornerInfo.channels = cornerDef.channels;
-            cornerInfo.canvas = new TCanvas(cornerInfo.name.c_str(), 
-                (cornerInfo.name + " MPV Distribution").c_str(), 1600, 800);
-            cornerInfo.canvas->Divide(2, 1);  // 2 列 1 行，横向排列，共 2 个 pad
+        std::vector<ChannelCornerInfo> channelInfo(8);
+        // TopRight (col=0-4, row=0-4): channels 0, 1
+        channelInfo[0] = {0, 0, gridXMin, gridXMin + cornerBlock * gridCellSizeX, 
+                         gridYMin, gridYMin + cornerBlock * gridCellSizeY, "TopRight"};
+        channelInfo[1] = channelInfo[0];
+        
+        // TopLeft (col=5-9, row=0-4): channels 2, 3
+        channelInfo[2] = {0, cornerBlock, gridXMin + cornerBlock * gridCellSizeX, gridXMax,
+                         gridYMin, gridYMin + cornerBlock * gridCellSizeY, "TopLeft"};
+        channelInfo[3] = channelInfo[2];
+        
+        // BottomRight (col=0-4, row=5-9): channels 4, 5
+        channelInfo[4] = {cornerBlock, 0, gridXMin, gridXMin + cornerBlock * gridCellSizeX,
+                         gridYMin + cornerBlock * gridCellSizeY, gridYMax, "BottomRight"};
+        channelInfo[5] = channelInfo[4];
+        
+        // BottomLeft (col=5-9, row=5-9): channels 6, 7
+        channelInfo[6] = {cornerBlock, cornerBlock, gridXMin + cornerBlock * gridCellSizeX, gridXMax,
+                         gridYMin + cornerBlock * gridCellSizeY, gridYMax, "BottomLeft"};
+        channelInfo[7] = channelInfo[6];
+        
+        // 创建并填充TH2D
+        for (int ch = 0; ch < 8; ++ch) {
+            std::string histName = "MPV_Channel" + std::to_string(ch);
+            std::string histTitle = "Channel " + std::to_string(ch) + " (" + channelInfo[ch].cornerName + 
+                                   ") MPV;X position (mm);Y position (mm);MPV";
             
-            // 计算该 corner 的物理位置范围
-            Double_t cornerXMin = gridXMin + cornerInfo.colStart * gridCellSizeX;
-            Double_t cornerXMax = gridXMin + (cornerInfo.colStart + cornerBlock) * gridCellSizeX;
-            Double_t cornerYMin = gridYMin + cornerInfo.rowStart * gridCellSizeY;
-            Double_t cornerYMax = gridYMin + (cornerInfo.rowStart + cornerBlock) * gridCellSizeY;
+            // 创建5×5的bin，对应corner的25个pad
+            mpvChannelTH2D[ch] = new TH2D(histName.c_str(), histTitle.c_str(),
+                                          cornerBlock, channelInfo[ch].xMin, channelInfo[ch].xMax,
+                                          cornerBlock, channelInfo[ch].yMin, channelInfo[ch].yMax);
+            mpvChannelTH2D[ch]->SetStats(0);
             
-            // 为每个 channel 创建 TH2D（使用物理位置坐标）
-            for (int ch : cornerInfo.channels) {
-                std::string th2dName = cornerInfo.name + "_ch" + std::to_string(ch);
-                std::string th2dTitle = cornerInfo.name + " Channel " + std::to_string(ch) + " MPV;X position (mm);Y position (mm)";
-                TH2D *th2d = new TH2D(th2dName.c_str(), th2dTitle.c_str(),
-                    cornerBlock, cornerXMin, cornerXMax, cornerBlock, cornerYMin, cornerYMax);
-                th2d->SetStats(0);
-                cornerInfo.th2dChannels.push_back(th2d);
-            }
+            // 遍历该corner的25个pad，填充MPV值
+            int rowStart = channelInfo[ch].rowStart;
+            int colStart = channelInfo[ch].colStart;
             
-            // 填充 TH2D：遍历该 corner 的所有 pad
             for (int dr = 0; dr < cornerBlock; ++dr) {
                 for (int dc = 0; dc < cornerBlock; ++dc) {
-                    int row = cornerInfo.rowStart + dr;
-                    int col = cornerInfo.colStart + dc;
-                    if (row < gridDivision && col < gridDivision) {
-                        int padIdx = row * gridDivision + col;
-                        // 计算该 pad 的物理位置（中心点）
+                    int row = rowStart + dr;
+                    int col = colStart + dc;
+                    
+                    // 计算padIdx
+                    int colForCanvas = (gridDivision - 1) - col;
+                    int padIdx = row * gridDivision + colForCanvas;
+                    
+                    // 获取MPV值
+                    Double_t mpv = mpvValues[padIdx][ch];
+                    
+                    if (mpv > 0) {  // 只填充有效的MPV值
+                        // 计算该pad的中心坐标
                         Double_t padX = gridXMin + (col + 0.5) * gridCellSizeX;
                         Double_t padY = gridYMin + (row + 0.5) * gridCellSizeY;
                         
-                        // 对于该 corner 的每个 channel，填充 MPV 值
-                        for (size_t chIdx = 0; chIdx < cornerInfo.channels.size(); ++chIdx) {
-                            int ch = cornerInfo.channels[chIdx];
-                            Double_t mpv = mpvValues[padIdx][ch];
-                            if (mpv > 0) {  // 只填充有效的 MPV 值
-                                TH2D *th2d = cornerInfo.th2dChannels[chIdx];
-                                th2d->Fill(padX, padY, mpv);
-                            }
-                        }
+                        // 填充到TH2D
+                        mpvChannelTH2D[ch]->Fill(padX, padY, mpv);
                     }
                 }
             }
-            
-            mpvCornerCanvases.push_back(std::move(cornerInfo));
         }
         
-        // 绘制 MPV TH2D 并标注数值
-        for (auto &cornerInfo : mpvCornerCanvases) {
-            for (size_t chIdx = 0; chIdx < cornerInfo.channels.size(); ++chIdx) {
-                int ch = cornerInfo.channels[chIdx];
-                cornerInfo.canvas->cd(chIdx + 1);
-                gPad->SetTicks();
-                TH2D *th2d = cornerInfo.th2dChannels[chIdx];
-                th2d->Draw("COLZ");
+        // 创建8页PDF，每页显示一个channel的MPV分布
+        TCanvas *mpvChannelCanvas = new TCanvas("MPVChannelCanvas", "MPV by Channel", 1200, 1000);
+        std::string pdfFileName = outputDir + "/MPV_by_Channel.pdf";
+        
+        for (int ch = 0; ch < 8; ++ch) {
+            mpvChannelCanvas->cd();
+            mpvChannelCanvas->Clear();
+            gPad->SetTicks();
+            gPad->SetRightMargin(0.18);  // 增大右边距，为color bar预留空间
+            gPad->SetLeftMargin(0.12);
+            gPad->SetTopMargin(0.12);    // 增大上边距，避免title和color bar重叠
+            gPad->SetBottomMargin(0.12);
+            
+            if (mpvChannelTH2D[ch]) {
+                // 设置bin内容显示格式为整数（无小数）
+                mpvChannelTH2D[ch]->SetMarkerSize(1.8);  // 增大TEXT字体大小
+                gStyle->SetPaintTextFormat("1.0f");     // 设置显示格式为整数
                 
-                // 在 TH2D 上标注 MPV 值
+                mpvChannelTH2D[ch]->Draw("COLZ TEXT");  // TEXT选项显示每个bin的数值
+                
+                // 调整Z轴title位置，避免与color bar的label重叠
+                mpvChannelTH2D[ch]->GetZaxis()->SetTitleOffset(1.8);  // 增大offset
+                mpvChannelTH2D[ch]->GetZaxis()->SetTitleSize(0.04);    // 稍微减小title字体
+            }
+            
+            // 保存PDF
+            if (ch == 0) {
+                mpvChannelCanvas->Print((pdfFileName + "(").c_str());
+            } else if (ch == 7) {
+                mpvChannelCanvas->Print((pdfFileName + ")").c_str());
+            } else {
+                mpvChannelCanvas->Print(pdfFileName.c_str());
+            }
+        }
+        
+        std::cout << "\nMPV by Channel PDF 已保存至: " << pdfFileName << std::endl;
+        
+        // 创建一个8 pad的canvas，按照corner位置排列
+        TCanvas *mpvAllChannelsCanvas = new TCanvas("MPVAllChannels", "MPV All Channels", 2400, 1200);
+        mpvAllChannelsCanvas->Divide(4, 2, 0.01, 0.01);  // 4列2行，小间隙
+        
+        // 定义8个pad的绘图顺序和对应的channel
+        // 布局：
+        // 1(ch2)  2(ch3)  |  3(ch0)  4(ch1)     <- TopLeft  | TopRight
+        // 5(ch6)  6(ch7)  |  7(ch4)  8(ch5)     <- BottomLeft | BottomRight
+        std::vector<int> channelOrder = {2, 3, 0, 1, 6, 7, 4, 5};
+        
+        for (int i = 0; i < 8; ++i) {
+            int ch = channelOrder[i];
+            mpvAllChannelsCanvas->cd(i + 1);
+            gPad->SetTicks();
+            gPad->SetRightMargin(0.15);
+            gPad->SetLeftMargin(0.12);
+            gPad->SetTopMargin(0.12);
+            gPad->SetBottomMargin(0.12);
+            
+            if (mpvChannelTH2D[ch]) {
+                mpvChannelTH2D[ch]->SetMarkerSize(1.8);
+                gStyle->SetPaintTextFormat("1.0f");
+                mpvChannelTH2D[ch]->Draw("COLZ TEXT");
+                mpvChannelTH2D[ch]->GetZaxis()->SetTitleOffset(1.8);  // 增大offset
+                mpvChannelTH2D[ch]->GetZaxis()->SetTitleSize(0.04);    // 稍微减小title字体
+            }
+        }
+        
+        // 保存为单页PDF
+        std::string allChannelsPdfFileName = outputDir + "/MPV_All_Channels.pdf";
+        mpvAllChannelsCanvas->SaveAs(allChannelsPdfFileName.c_str());
+        std::cout << "MPV All Channels PDF 已保存至: " << allChannelsPdfFileName << std::endl;
+        
+        // 创建8个TH1D，收集每个channel的MPV分布
+        std::vector<TH1D*> mpvChannelTH1D(8, nullptr);
+        
+        for (int ch = 0; ch < 8; ++ch) {
+            std::string histName = "MPV_Hist_Channel" + std::to_string(ch);
+            std::string histTitle = "Channel " + std::to_string(ch) + " (" + channelInfo[ch].cornerName + 
+                                   ") MPV Distribution;MPV;Entries";
+            
+            // 创建TH1D，范围根据MPV的典型值设置
+            mpvChannelTH1D[ch] = new TH1D(histName.c_str(), histTitle.c_str(), 50, 700., 1900.);
+            mpvChannelTH1D[ch]->SetStats(0);  // 不显示stat box
+            mpvChannelTH1D[ch]->SetLineColor(kBlack);  // 黑线
+            mpvChannelTH1D[ch]->SetLineWidth(2);
+            mpvChannelTH1D[ch]->SetFillColor(kBlue);   // 蓝色填充
+            mpvChannelTH1D[ch]->SetFillStyle(3004);    // 花纹样式
+            
+            // 从TH2D中提取所有有效的MPV值填充到TH1D
+            if (mpvChannelTH2D[ch]) {
                 for (int binX = 1; binX <= cornerBlock; ++binX) {
                     for (int binY = 1; binY <= cornerBlock; ++binY) {
-                        Double_t mpv = th2d->GetBinContent(binX, binY);
-                        if (mpv > 0) {
-                            // 获取 bin 的中心坐标（物理位置）
-                            Double_t x = th2d->GetXaxis()->GetBinCenter(binX);
-                            Double_t y = th2d->GetYaxis()->GetBinCenter(binY);
-                            // 创建文本标签
-                            TText *text = new TText(x, y, Form("%.0f", mpv));
-                            text->SetTextAlign(22);  // 居中
-                            text->SetTextSize(0.03);
-                            text->SetTextColor(kBlack);
-                            text->Draw();
+                        Double_t mpv = mpvChannelTH2D[ch]->GetBinContent(binX, binY);
+                        if (mpv > 0) {  // 只填充有效的MPV值
+                            mpvChannelTH1D[ch]->Fill(mpv);
                         }
                     }
                 }
             }
         }
+        
+        // 创建8 pad canvas显示MPV分布histogram
+        TCanvas *mpvHistCanvas = new TCanvas("MPVHistCanvas", "MPV Distribution by Channel", 2400, 1200);
+        mpvHistCanvas->Divide(4, 2, 0.01, 0.01);  // 4列2行，和TH2D的布局一致
+        
+        for (int i = 0; i < 8; ++i) {
+            int ch = channelOrder[i];
+            mpvHistCanvas->cd(i + 1);
+            gPad->SetTicks();
+            gPad->SetLeftMargin(0.12);
+            gPad->SetRightMargin(0.05);
+            gPad->SetTopMargin(0.1);
+            gPad->SetBottomMargin(0.12);
+            
+            if (mpvChannelTH1D[ch]) {
+                mpvChannelTH1D[ch]->Draw("HIST");
+                
+                // 计算统计量
+                if (mpvChannelTH1D[ch]->GetEntries() > 0) {
+                    Double_t mean = mpvChannelTH1D[ch]->GetMean();
+                    Double_t rms = mpvChannelTH1D[ch]->GetRMS();
+                    Double_t rmsOverMean = (mean > 0) ? rms / mean : 0.0;
+                    
+                    // 使用TLatex显示统计信息
+                    TLatex *latex = new TLatex();
+                    latex->SetNDC(true);
+                    latex->SetTextFont(62);         // 粗体字体，更明显
+                    latex->SetTextSize(0.06);       // 增大字体
+                    latex->SetTextColor(kRed + 1);  // 红色，更醒目
+                    
+                    // 在图上显示MEAN, RMS, RMS/MEAN（向左下移动）
+                    Double_t textX = 0.45;   // 从0.55向左移到0.45
+                    Double_t textY1 = 0.75;  // 从0.85向下移到0.75
+                    Double_t textY2 = 0.65;  // 从0.75向下移到0.65
+                    Double_t textY3 = 0.55;  // 从0.65向下移到0.55
+                    
+                    latex->DrawLatex(textX, textY1, Form("Mean = %.1f", mean));
+                    latex->DrawLatex(textX, textY2, Form("RMS = %.1f", rms));
+                    latex->DrawLatex(textX, textY3, Form("RMS/Mean = %.4f", rmsOverMean));
+                }
+            }
+        }
+        
+        // 保存为单页PDF
+        std::string mpvHistPdfFileName = outputDir + "/MPV_Distribution_All_Channels.pdf";
+        mpvHistCanvas->SaveAs(mpvHistPdfFileName.c_str());
+        std::cout << "MPV Distribution All Channels PDF 已保存至: " << mpvHistPdfFileName << std::endl;
         
         TCanvas *canvas = new TCanvas("CellRealADCGrid", "CellRealADC grid", 2400, 2400);
         canvas->Divide(gridDivision, gridDivision);
@@ -521,28 +638,41 @@ void ana(std::string option) {
             info.name = name;
             info.canvas = new TCanvas(name.c_str(), name.c_str(), 1600, 1600);
             info.canvas->Divide(cornerBlock, cornerBlock);
+            // 收集该corner的所有padIdx，然后按照padIdx顺序排列
+            // 这样PadCorner的排列和CellRealADC_grid完全一致
+            std::vector<int> cornerPadIndices;
             for (int dr = 0; dr < cornerBlock; ++dr) {
                 for (int dc = 0; dc < cornerBlock; ++dc) {
                     int row = rowStart + dr;
                     int col = colStart + dc;
                     if (row < gridDivision && col < gridDivision) {
-                        int padIdx = row * gridDivision + col;
-                        info.padIndices.push_back(padIdx);
-                        TLegend *cornerLeg = new TLegend(0.35, 0.45, 0.77, 0.75);
-                        cornerLeg->SetBorderSize(0);
-                        cornerLeg->SetFillStyle(0);
-                        cornerLeg->SetTextSize(0.05);
-                        cornerPadLegends[padIdx] = cornerLeg;
-                        cornerLegendsOwned.push_back(cornerLeg);
+                        int colForCanvas = (gridDivision - 1) - col;
+                        int padIdx = row * gridDivision + colForCanvas;
+                        cornerPadIndices.push_back(padIdx);
                     }
                 }
             }
+            // 按padIdx从小到大排序，保持和CellRealADC_grid相同的顺序
+            std::sort(cornerPadIndices.begin(), cornerPadIndices.end());
+            
+            for (int padIdx : cornerPadIndices) {
+                info.padIndices.push_back(padIdx);
+                TLegend *cornerLeg = new TLegend(0.35, 0.45, 0.77, 0.75);
+                cornerLeg->SetBorderSize(0);
+                cornerLeg->SetFillStyle(0);
+                cornerLeg->SetTextSize(0.05);
+                cornerPadLegends[padIdx] = cornerLeg;
+                cornerLegendsOwned.push_back(cornerLeg);
+            }
             cornerCanvases.push_back(std::move(info));
         };
-        createCornerCanvas("PadCorner_TopLeft", 0, 0);
-        createCornerCanvas("PadCorner_TopRight", 0, gridDivision - cornerBlock);
-        createCornerCanvas("PadCorner_BottomLeft", gridDivision - cornerBlock, 0);
-        createCornerCanvas("PadCorner_BottomRight", gridDivision - cornerBlock,
+        // 注意：原点在右上角，X轴正向向左，Y轴正向向下
+        // col=0-4 对应 X=160-310 (右侧), col=5-9 对应 X=310-460 (左侧)
+        // row=0-4 对应 Y=140.5-290.5 (上侧), row=5-9 对应 Y=290.5-440.5 (下侧)
+        createCornerCanvas("PadCorner_TopRight", 0, 0);                              // 右上: col=0-4, row=0-4
+        createCornerCanvas("PadCorner_TopLeft", 0, gridDivision - cornerBlock);      // 左上: col=5-9, row=0-4
+        createCornerCanvas("PadCorner_BottomRight", gridDivision - cornerBlock, 0);  // 右下: col=0-4, row=5-9
+        createCornerCanvas("PadCorner_BottomLeft", gridDivision - cornerBlock,       // 左下: col=5-9, row=5-9
                            gridDivision - cornerBlock);
         for (auto &corner : cornerCanvases) {
             for (size_t idx = 0; idx < corner.padIndices.size(); ++idx) {
@@ -580,7 +710,7 @@ void ana(std::string option) {
                 hist->SetStats(0);
                 hist->GetXaxis()->SetRangeUser(200., 3000.);
                 hist->GetXaxis()->SetTitle("CellRealADC");
-                hist->GetYaxis()->SetRangeUser(0., 50.);
+                hist->GetYaxis()->SetRangeUser(0., 60.);
                 hist->GetYaxis()->SetTitle("Counts");
                 hist->Draw(firstDrawn ? "HIST SAME" : "HIST");
                 // 绘制拟合曲线
@@ -681,12 +811,6 @@ void ana(std::string option) {
                 corner.canvas->SaveAs((outputDir + "/" + corner.name + ".pdf").c_str());
             }
         }
-        // 保存 MPV canvas 为 PDF
-        for (const auto &mpvCorner : mpvCornerCanvases) {
-            if (mpvCorner.canvas) {
-                mpvCorner.canvas->SaveAs((outputDir + "/" + mpvCorner.name + ".pdf").c_str());
-            }
-        }
         
         outputFile->cd();
         TDirectory *cornerDir = outputFile->mkdir("PadCornerCanvases");
@@ -699,19 +823,16 @@ void ana(std::string option) {
             }
             outputFile->cd();
         }
-        // 保存 MPV canvas 和 TH2D
-        TDirectory *mpvDir = outputFile->mkdir("MPVCornerCanvases");
-        if (mpvDir) {
-            mpvDir->cd();
-            for (const auto &mpvCorner : mpvCornerCanvases) {
-                if (mpvCorner.canvas) {
-                    mpvCorner.canvas->Write();
+        // 保存8个channel的MPV TH2D和TH1D
+        TDirectory *mpvChannelDir = outputFile->mkdir("MPVbyChannel");
+        if (mpvChannelDir) {
+            mpvChannelDir->cd();
+            for (int ch = 0; ch < 8; ++ch) {
+                if (mpvChannelTH2D[ch]) {
+                    mpvChannelTH2D[ch]->Write();
                 }
-                // 保存每个 channel 的 TH2D
-                for (TH2D *th2d : mpvCorner.th2dChannels) {
-                    if (th2d) {
-                        th2d->Write();
-                    }
+                if (mpvChannelTH1D[ch]) {
+                    mpvChannelTH1D[ch]->Write();
                 }
             }
             outputFile->cd();
@@ -748,15 +869,22 @@ void ana(std::string option) {
         for (TLegend *leg : cornerLegendsOwned) {
             delete leg;
         }
-        // 清理 MPV canvas 和 TH2D
-        for (auto &mpvCorner : mpvCornerCanvases) {
-            if (mpvCorner.canvas) {
-                delete mpvCorner.canvas;
+        // 清理MPV channel canvas和TH2D/TH1D
+        if (mpvChannelCanvas) {
+            delete mpvChannelCanvas;
+        }
+        if (mpvAllChannelsCanvas) {
+            delete mpvAllChannelsCanvas;
+        }
+        if (mpvHistCanvas) {
+            delete mpvHistCanvas;
+        }
+        for (int ch = 0; ch < 8; ++ch) {
+            if (mpvChannelTH2D[ch]) {
+                delete mpvChannelTH2D[ch];
             }
-            for (TH2D *th2d : mpvCorner.th2dChannels) {
-                if (th2d) {
-                    delete th2d;
-                }
+            if (mpvChannelTH1D[ch]) {
+                delete mpvChannelTH1D[ch];
             }
         }
         delete xyDistribution;
